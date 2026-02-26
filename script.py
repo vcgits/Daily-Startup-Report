@@ -1,53 +1,180 @@
 import os
-import pandas as pd
+import json
+import logging
 import smtplib
-from email.message import EmailMessage
+import tempfile
 from datetime import datetime
+from email.message import EmailMessage
+
+import pandas as pd
 from google import genai
 from google.genai import types
 
-def generate_report():
-    # 1. Initialize Gemini with Search Tool
-    client = genai.Client(api_key=os.environ.get('GEMINI_API_KEY'))
-    today_date = datetime.now().strftime('%Y-%m-%d')
-    
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ── Config ───────────────────────────────────────────────────────────────────
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "venkatacharan010@gmail.com")
+GEMINI_MODEL    = "gemini-2.0-flash"
+
+COLUMNS = ["Company Name", "USP", "Founder", "LinkedIn", "Funding Amount", "Investor(s)"]
+
+
+# ── 1. Fetch data from Gemini ────────────────────────────────────────────────
+def fetch_startup_data(today_date: str) -> list[dict]:
+    """Call Gemini with Google Search and return a list of startup dicts."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise EnvironmentError("GEMINI_API_KEY environment variable is not set.")
+
+    client = genai.Client(api_key=api_key)
+
     prompt = f"""
-    Search news for today ({today_date}) from The Economic Times and The Hindu.
-    Identify Indian startups that announced VC funding. 
-    Return a list of startups with: Company Name, USP, Founder Name, and LinkedIn Link.
-    Ensure output is a simple list I can convert to a table.
+    Today is {today_date}.
+    Use Google Search to find news from The Economic Times and The Hindu published today.
+    Identify Indian startups that announced VC / angel / seed funding today.
+
+    Return ONLY a valid JSON array (no markdown, no explanation) where each element has exactly these keys:
+    "Company Name", "USP", "Founder", "LinkedIn", "Funding Amount", "Investor(s)"
+
+    If a field is unknown, use null.
+
+    Example format:
+    [
+      {{
+        "Company Name": "Acme AI",
+        "USP": "AI-powered supply chain optimisation",
+        "Founder": "Ravi Kumar",
+        "LinkedIn": "https://linkedin.com/in/ravikumar",
+        "Funding Amount": "$5M",
+        "Investor(s)": "Sequoia India, Angel Network"
+      }}
+    ]
     """
 
+    logger.info("Calling Gemini (%s) with Google Search tool ...", GEMINI_MODEL)
     response = client.models.generate_content(
-        model="gemini-2.0-flash", # Use the flash model for speed
+        model=GEMINI_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())]
-        )
+        ),
     )
-    
-    # 2. Logic to Parse Gemini text into a DataFrame (Simplified for this example)
-    # Note: In production, use Gemini's 'response_mime_type': 'application/json' for 100% accuracy.
-    data = [] # Data parsed from response.text
-    
-    # 3. Create Excel
-    df = pd.DataFrame(data, columns=["Company Name", "USP", "Founder", "LinkedIn"])
-    filename = f"Funding_Report_{today_date}.xlsx"
-    df.to_excel(filename, index=False)
-    
-    # 4. Email Delivery
+
+    raw_text = response.text.strip()
+    logger.debug("Raw Gemini response:\n%s", raw_text)
+
+    # Strip markdown code fences if present
+    if raw_text.startswith("```"):
+        raw_text = raw_text.split("```")[1]
+        if raw_text.lower().startswith("json"):
+            raw_text = raw_text[4:]
+        raw_text = raw_text.strip()
+
+    try:
+        data = json.loads(raw_text)
+        if not isinstance(data, list):
+            raise ValueError("Expected a JSON array at the top level.")
+        logger.info("Parsed %d startup record(s) from Gemini.", len(data))
+        return data
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.error("Failed to parse Gemini response as JSON: %s", exc)
+        logger.error("Raw text was:\n%s", raw_text)
+        return []
+
+
+# ── 2. Build Excel ───────────────────────────────────────────────────────────
+def build_excel(data: list[dict], today_date: str, filepath: str) -> None:
+    """Write startup data to an Excel file at filepath."""
+    df = pd.DataFrame(data, columns=COLUMNS)
+
+    # Fill missing columns gracefully
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[COLUMNS]  # enforce column order
+
+    with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Funding Report")
+
+        # Auto-fit column widths
+        ws = writer.sheets["Funding Report"]
+        for col_cells in ws.columns:
+            max_len = max(
+                (len(str(cell.value)) if cell.value is not None else 0)
+                for cell in col_cells
+            )
+            ws.column_dimensions[col_cells[0].column_letter].width = min(max_len + 4, 60)
+
+    logger.info("Excel saved -> %s (%d row(s))", filepath, len(df))
+
+
+# ── 3. Send email ────────────────────────────────────────────────────────────
+def send_email(filepath: str, today_date: str, row_count: int) -> None:
+    """Attach the Excel file and send via Gmail SMTP SSL."""
+    gmail_user = os.environ.get("GMAIL_USER")
+    gmail_app_password = os.environ.get("GMAIL_APP_PASSWORD")  # Use App Password, NOT account password
+
+    if not gmail_user or not gmail_app_password:
+        raise EnvironmentError(
+            "GMAIL_USER and GMAIL_APP_PASSWORD environment variables must be set."
+        )
+
+    filename = os.path.basename(filepath)
+    body = (
+        f"Hi,\n\n"
+        f"Please find attached the Daily Startup Funding Report for {today_date}.\n"
+        f"Total startups found: {row_count}\n\n"
+        f"Sources searched: The Economic Times, The Hindu\n\n"
+        f"This report was auto-generated by the Daily Startup Report bot.\n"
+    )
+
     msg = EmailMessage()
-    msg['Subject'] = f"Daily Startup Funding Report - {today_date}"
-    msg['From'] = os.environ.get('GMAIL_USER')
-    msg['To'] = "venkatacharan010@gmail.com"
-    msg.set_content("Attached is today's research on newly funded Indian startups.")
+    msg["Subject"] = f"Daily Startup Funding Report - {today_date}"
+    msg["From"]    = gmail_user
+    msg["To"]      = RECIPIENT_EMAIL
+    msg.set_content(body)
 
-    with open(filename, 'rb') as f:
-        msg.add_attachment(f.read(), maintype='application', subtype='octet-stream', filename=filename)
+    with open(filepath, "rb") as f:
+        msg.add_attachment(
+            f.read(),
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=filename,
+        )
 
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-        smtp.login(os.environ.get('GMAIL_USER'), os.environ.get('GMAIL_PASSWORD'))
+    logger.info("Sending email to %s ...", RECIPIENT_EMAIL)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(gmail_user, gmail_app_password)
         smtp.send_message(msg)
+    logger.info("Email sent successfully.")
+
+
+# ── Orchestrator ─────────────────────────────────────────────────────────────
+def generate_report() -> None:
+    today_date = datetime.now().strftime("%Y-%m-%d")
+    filename   = f"Funding_Report_{today_date}.xlsx"
+
+    # Use a temp directory so we don't litter the working directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filepath = os.path.join(tmpdir, filename)
+
+        # Step 1 - fetch
+        data = fetch_startup_data(today_date)
+
+        # Step 2 - build Excel
+        build_excel(data, today_date, filepath)
+
+        # Step 3 - send email
+        send_email(filepath, today_date, row_count=len(data))
+
+    logger.info("Done.")
+
 
 if __name__ == "__main__":
     generate_report()
