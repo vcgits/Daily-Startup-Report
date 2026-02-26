@@ -1,0 +1,16 @@
+name: 8AM Startup Report
+on:
+  schedule:
+    - cron: '30 2 * * *' # 2:30 AM UTC = 8:00 AM IST
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Run Script
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: |
+          pip install pandas openpyxl
+          python script.py
