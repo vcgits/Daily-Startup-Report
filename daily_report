@@ -1,0 +1,21 @@
+name: Daily Startup Report
+on:
+  schedule:
+    - cron: '30 2 * * *' # Runs at 8:00 AM IST (2:30 AM UTC)
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+      - name: Install Dependencies
+        run: pip install pandas openpyxl
+      - name: Run Scraper and Mailer
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: python script.py
