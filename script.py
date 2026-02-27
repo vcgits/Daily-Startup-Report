@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ───────────────────────────────────────────────────────────────────
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "venkatacharan010@gmail.com")
-GEMINI_MODEL    = "gemini-1.5-pro"
+GEMINI_MODEL    = "gemini-3-flash-preview"
 
 COLUMNS = ["Company Name", "USP", "Founder", "LinkedIn", "Funding Amount", "Investor(s)"]
 
